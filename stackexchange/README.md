@@ -1,0 +1,1 @@
+This directory should have the stackexchange dump for `extract.sh` to work off the shelf. This behavior can be changed by modifying `input_folder` in `extract.sh`

@@ -90,7 +90,8 @@ def get_posts_df(filename):
         ans_id = row['ans_id']
         q_ts = ques_ts[ques_id]
         a_ts = ans_ts[ans_id]
-        posts_df.set_value(i, 'time_to_ans', a_ts - q_ts)
+        diff = a_ts - q_ts
+        posts_df.set_value(i, 'time_to_ans', max(100, a_ts - q_ts))
     return posts_df
 
 

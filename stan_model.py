@@ -9,7 +9,7 @@ import seaborn as sns
 import matplotlib
 
 
-def load_data(filepath, train_test_split = 0.9, logit=False, more_drop=False):
+def load_data(filepath, train_test_split = 0.9, logit=False, more_drop=False, normalization=True):
     '''
     For a given file, loads in data and returns a dictionary with data values
     filepath should contain posts.csv and users.csv
@@ -70,16 +70,17 @@ def load_data(filepath, train_test_split = 0.9, logit=False, more_drop=False):
     train_data = train_data.drop(['time_to_ans', 'user_id', 'ans_id', 'ques_id'], axis=1)
     test_data = test_data.drop(['time_to_ans', 'user_id', 'ans_id', 'ques_id'], axis=1)
 
-    # drop additional data as a test
+    # drops all user data
     if more_drop:
         train_data = train_data.drop(['views','downvotes','age','reputation','upvotes'], axis=1)
         test_data = test_data.drop(['views','downvotes','age','reputation','upvotes'], axis=1)
 
     # good old feature normalization - zero mean and unit variance
-    means = train_data.mean()
-    std = train_data.std()
-    train_data = (train_data - means) / std
-    test_data = (test_data - means) / std
+    if normalization:
+        means = train_data.mean()
+        std = train_data.std()
+        train_data = (train_data - means) / std
+        test_data = (test_data - means) / std
 
     # min-max scaling for actual values to keep gamma format
     # max_val = max(y_train)
@@ -176,25 +177,26 @@ def gamma_glm(data):
     }
 
     parameters {
-        real<lower = 0> alpha;
-        real beta_0;
-        vector[K] beta;
+        real<lower=.001> beta_0;
+        vector<lower=.001>[K] beta;
         real<lower=.001> phi;
+        real<lower=.001> alpha;
     }
 
     model {
-        alpha ~ normal(1,0.25);     // space similar to exponential distribution
+        alpha ~ normal(20,10);
         for (k in 1:K)
-            beta[k] ~ normal(0,1);
-        beta_0 ~ normal(0,1);
-        phi ~ normal(0,1);
-        y ~ gamma(alpha, (exp(x * beta + beta_0)) + phi);       // log-link
+            beta[k] ~ normal(0,1000);
+        beta_0 ~ normal(10000,1000);
+        phi ~ normal(0,2);
+        for (k in 1:K)
+            y ~ gamma(alpha, inv(x[k] * beta + beta_0) + phi);       // inverse-link
     }
 
     generated quantities {                              // predictions!
         vector[N_test] y_test;
         for (n in 1:N_test)
-            y_test[n] <- gamma_rng(alpha, (exp(x_test[n] * beta + beta_0)) + phi);
+            y_test[n] <- gamma_rng(alpha, inv(x_test[n] * beta + beta_0) + phi);
     }
     """
 
@@ -208,6 +210,63 @@ def gamma_glm(data):
     eval_acc(fit, data)
     # fit.traceplot()
     # py.show()
+
+
+def exponential_glm(data):
+    '''
+    Gamma GLM for use in bayesian class project
+    input: data - dictionary of data for stan model
+    :return:
+    '''
+
+    # if you want to make this better/run more expts, dynamically generate some of this model.
+    # presently, assume flat priors for all parameters
+    stan_data = data[0]
+
+    stan_model = """
+    data {
+        int<lower=0> N;              // number of samples
+        int<lower=0> N_test;
+        int<lower=0> K;              // length of each X vector
+        matrix[N,K] x;
+        vector[N] y;
+
+        matrix[N_test,K] x_test;    // samples for testing
+    }
+
+    parameters {
+        real<lower=.001> beta_0;
+        vector<lower=.001>[K] beta;
+        real<lower=.001> phi;
+    }
+
+    model {
+        for (k in 1:K)
+            beta[k] ~ normal(0,1000);
+        beta_0 ~ normal(10000,1000);
+        phi ~ normal(0,2);
+        for (k in 1:K)
+            y ~ exponential( inv(x[k] * beta + beta_0) + phi);       // inverse-link
+    }
+
+    generated quantities {                              // predictions!
+        vector[N_test] y_test;
+        for (n in 1:N_test)
+            y_test[n] <- exponential_rng(inv(x_test[n] * beta + beta_0) + phi);
+    }
+    """
+
+    # fit model
+    fit = pystan.stan(model_code=stan_model, data=stan_data, iter=2000, chains=4, thin=1)
+
+    print "Model:"
+
+    print fit
+
+    eval_acc(fit, data)
+    # fit.traceplot()
+    # py.show()
+
 
 def bayes_logit(data):
     stan_data = data[0]
@@ -293,7 +352,7 @@ def logit_acc(fit, data):
     betas = fit.extract('beta')['beta']
     ax = sns.violinplot(data=betas[1000:, :])
     ax.set_xticklabels(data[1],rotation='vertical')
-    ax.set_title('Beta values for Academia', fontsize=24)
+    ax.set_title('Beta values for Data Science', fontsize=24)
     py.savefig('academia_vplot.jpg')
     py.show()
 
@@ -330,8 +389,17 @@ def eval_acc(fit, data):
         print "Avg answer time in days: "
         print np.mean(data[0]['y_test'])/(3600*24)
 
+        print "Stdev answer time in days"
+        print np.std(data[0]['y_test'])/(3600*24)
+
         print "RMSE in days: "
         print rmse / (3600*24)
+
+        print "avg predicted answer time in days: "
+        print np.mean(y_means)/(3600*24)
+
+        print "Stdev predicted answer time in days: "
+        print np.std(y_means)/(3600*24)
 
     # print out parameters and values
     print 'parameters: '
@@ -344,14 +412,21 @@ def eval_acc(fit, data):
         else:
             start += 1
 
-    for val in zip(data[1], np.mean(fit_means[start:start + num_params], axis=1)):
+    # need to be careful here with beta_0, seem to be doing that now
+    print 'unnormalized features:'
+    for val in zip(np.insert(data[1].values,0,'beta_0'), np.mean(fit_means[start:start + num_params + 1], axis=1)):
+        print val
+
+    print 'feature weights in exp function:'
+    normalized_feature_importances = [(val[0]*val[1])**-1 for val in zip(np.mean(fit_means[start:start + num_params + 1], axis=1), np.insert(np.mean(data[0]['x_test'],axis=0), 0, 1))]
+    for val in zip(np.insert(data[1].values,0,'beta_0'), normalized_feature_importances):
         print val
 
     #make plots of values
     betas = fit.extract('beta')['beta']
     ax = sns.violinplot(data=betas[1000:, :])
     ax.set_xticklabels(data[1],rotation='vertical')
-    ax.set_title('Beta values for Academia, gamma GLM', fontsize=24)
+    ax.set_title('Beta values for Academia, Exponential GLM', fontsize=24)
     py.savefig('academia_glm_vplot.jpg')
     py.show()
 
@@ -361,16 +436,19 @@ def eval_acc(fit, data):
 
 
 if __name__ == '__main__':
+    np.random.seed(1234)
     #params = load_data(['./data/datascience.stackexchange.com', './data/academia.stackexchange.com', './data/3dprinting.stackexchange.com'], logit=True)
-    params = load_data('./data/datascience.stackexchange.com', logit=False, more_drop=False)
+    params = load_data('./data/academia.stackexchange.com', logit=True, more_drop=False, normalization=True)
     # do a basic linear regression
     #basic_linear(params)
 
     # pdb.set_trace()
 
     # do a less basic gamma generalized linear modelc
-    gamma_glm(params)
-    #bayes_logit(params)
+    # gamma_glm(params)
+    bayes_logit(params)
+    # exponential_glm(params)
+
 
 
 # noinspection PyByteLiteral
